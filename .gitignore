@@ -1,0 +1,22 @@
+# ===== Keil MDK-ARM 编译产物 =====
+MDK-ARM/Chassis/
+MDK-ARM/*.lst
+MDK-ARM/*.htm
+MDK-ARM/build_log.htm
+
+# ===== Keil 用户/调试特定文件 =====
+MDK-ARM/*.uvguix.*
+MDK-ARM/JLinkLog.txt
+MDK-ARM/JLinkSettings.ini
+MDK-ARM/EventRecorderStub.scvd
+
+# ===== 通用编译产物 =====
+*.o
+*.d
+*.crf
+*.axf
+*.hex
+*.map
+*.lnp
+*.sct
+*.dep
