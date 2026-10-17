@@ -1902,6 +1902,11 @@
               <FileType>1</FileType>
               <FilePath>..\components\algorithm\src\user_lib.c</FilePath>
             </File>
+            <File>
+              <FileName>fuzzy_pid.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\components\algorithm\src\fuzzy_pid.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

@@ -33,6 +33,7 @@
 #include "ramp.h"
 #include "arm_math.h"
 #include "mecanum.h"
+#include "fuzzy_pid.h"
 
 // ==========================================================
 // 全局变量与静态变量
@@ -50,6 +51,11 @@ uint16_t pwr_t;
 static float gimbal_yaw_angle = 0.0f;   /* 云台 yaw 角度制 0~360 */
 static float gimbal_error_angle = 0.0f; /* 底盘/云台夹角 */
 static float follow_yaw_v = 0.0f;       /* 云台下发的 yaw 角速度 rad/s */
+
+/* 角度环模糊PID：根据误差和误差率动态调整增益 */
+static FuzzyRule_t angle_fuzzy_rule;
+/* 角度环基础增益（模糊PID 在此基础上微调，待实车调） */
+static const fp32 follow_angle_base[3] = {0.0f, 0.0f, 0.0f};  /* Kp, Ki, Kd */
 
 extern PidTypeDef M3508_speedPID[4];
 extern PidTypeDef Pid_Vw_A;
@@ -120,6 +126,11 @@ void Chassis_Init()
 	  Chassis_BufferPower_init();//超电缓冲能量 PID
     Chassis_Follow_init();//跟随双环（角度环 + 速度环）
     Chassis_Spin_init();//小陀螺结构体初始化
+
+    /* 角度环模糊PID初始化（ratio/步长待实车调） */
+    Fuzzy_Rule_Init(&angle_fuzzy_rule, NULL, NULL, NULL,
+                    0.2f, 0.01f, 0.1f,   /* Kp/Ki/Kd 增量缩放 */
+                    30.0f, 100.0f);      /* eStep(度) / ecStep(度/s) */
 
     Chassis_Info.Last_Mode = 0xFF;//底盘失能
 }
@@ -310,6 +321,12 @@ void Chassis_Taget_Update()
     {
         case Chassis_Follow:
         {
+            /* 模糊PID：根据角度误差和误差率动态调整增益 */
+            Fuzzy_Rule_Implementation(&angle_fuzzy_rule, gimbal_error_angle, 0.0f);
+            Pid_Vw_A.Kp = follow_angle_base[0] + angle_fuzzy_rule.KpFuzzy;
+            Pid_Vw_A.Ki = follow_angle_base[1];
+            Pid_Vw_A.Kd = follow_angle_base[2];
+
             float follow_feedback = PID_calc(&Pid_Vw_A, gimbal_error_angle, 0);
             float abs_err = fabsf(gimbal_error_angle);
             if (abs_err < 0.2f) follow_feedback = 0.0f;
