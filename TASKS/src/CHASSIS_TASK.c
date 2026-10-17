@@ -47,20 +47,7 @@ RC_ctrl_t rc_ctrl;                 /* DBUS 驱动已删除，遥控器数据恒�
 Comm_Typedef_Info Comm_Info;        /* 底盘模式（原 COMMON_TASK.c 定义） */
 uint16_t pwr_t;
 
-/* 云台下发的数据（gimbal_receiver_pack1/pack2，来自 CAN2 0x150/0x151） */
-static float gimbal_yaw_angle = 0.0f;   /* 云台 yaw 角度制 0~360 */
-static float gimbal_error_angle = 0.0f; /* 底盘/云台夹角 */
-static float follow_yaw_v = 0.0f;       /* 云台下发的 yaw 角速度 rad/s */
-
-/* 角度环模糊PID：根据误差和误差率动态调整增益 */
-static FuzzyRule_t angle_fuzzy_rule;
-/* 角度环基础增益（模糊PID 在此基础上微调，待实车调） */
-static const fp32 follow_angle_base[3] = {0.0f, 0.0f, 0.0f};  /* Kp, Ki, Kd */
-
-extern PidTypeDef M3508_speedPID[4];
-extern PidTypeDef Pid_Vw_A;
-extern PidTypeDef Pid_Vw_V;
-extern PidTypeDef Pid_Spin_V;
+extern Chassis_Ctrl_t chassis_ctrl;
 
 // ==========================================================
 // 内部函数声明
@@ -127,23 +114,25 @@ void Chassis_Init()
     Chassis_Follow_init();//跟随双环（角度环 + 速度环）
     Chassis_Spin_init();//小陀螺结构体初始化
 
-    /* 角度环模糊PID初始化（ratio/步长待实车调） */
-    Fuzzy_Rule_Init(&angle_fuzzy_rule, NULL, NULL, NULL,
-                    0.2f, 0.01f, 0.1f,   /* Kp/Ki/Kd 增量缩放 */
-                    30.0f, 100.0f);      /* eStep(度) / ecStep(度/s) */
+    /* 模糊PID初始化：参数来自 chassis_ctrl.fuzzy_ratio/estep/ecstep（debug 里可改） */
+    Fuzzy_Rule_Init(&chassis_ctrl.fuzzy, NULL, NULL, NULL,
+                    chassis_ctrl.fuzzy_ratio[0], chassis_ctrl.fuzzy_ratio[1], chassis_ctrl.fuzzy_ratio[2],
+                    chassis_ctrl.fuzzy_estep, chassis_ctrl.fuzzy_ecstep);
+
+    chassis_ctrl.spin.enable = 0;  // 小陀螺默认关（开环，暂不用）
 
     Chassis_Info.Last_Mode = 0xFF;//底盘失能
 }
 
 static void Clear_Chassis_PID(void)
 {
-    PID_clear(&M3508_speedPID[0]);
-    PID_clear(&M3508_speedPID[1]);
-    PID_clear(&M3508_speedPID[2]);
-    PID_clear(&M3508_speedPID[3]);
-    PID_clear(&Pid_Vw_A);
-    PID_clear(&Pid_Vw_V);
-    PID_clear(&Pid_Spin_V);
+    PID_clear(&chassis_ctrl.wheel_speed[0]);
+    PID_clear(&chassis_ctrl.wheel_speed[1]);
+    PID_clear(&chassis_ctrl.wheel_speed[2]);
+    PID_clear(&chassis_ctrl.wheel_speed[3]);
+    PID_clear(&chassis_ctrl.vw_angle);
+    PID_clear(&chassis_ctrl.vw_vel);
+    PID_clear(&chassis_ctrl.spin);
 }
 
 // ==========================================================
@@ -260,9 +249,9 @@ void Chassis_Taget_Update()
     // --------------------------------------------------------
 	
 		//角度制云台角度
-    gimbal_yaw_angle = gimbal_receiver_pack1.yaw_pose / 65536.0f * 360.0f;
+    chassis_ctrl.yaw_angle = gimbal_receiver_pack1.yaw_pose / 65536.0f * 360.0f;
 		//弧度制云台速度
-    follow_yaw_v = gimbal_receiver_pack2.turn_yaw_speed * 0.01f * DegreesToRadians;
+    chassis_ctrl.yaw_v = gimbal_receiver_pack2.turn_yaw_speed * 0.01f * DegreesToRadians;
 
 	
 		//状态检测及运动刷新
@@ -293,13 +282,13 @@ void Chassis_Taget_Update()
 		//计算云台当前角度相对于机械零位的偏差，并限制在 [-180°, 180°] 范围内
     // 四面对称：底盘有对称结构，偏差 90° 和 270° 等价（取最小角度）
     // --------------------------------------------------------
-    gimbal_error_angle = angle_z_err_get(gimbal_yaw_angle, GIMBAL_FOLLOW_ZERO);
+    chassis_ctrl.error_angle = angle_z_err_get(chassis_ctrl.yaw_angle, GIMBAL_FOLLOW_ZERO);
 
     // --------------------------------------------------------
     // (3) 坐标系旋转（云台系 -> 底盘系）
     // --------------------------------------------------------
 		//前方误差角度
-    float angle_err_front = limit_angle(GIMBAL_MOTOR_SIGN * (gimbal_yaw_angle - GIMBAL_FOLLOW_ZERO));
+    float angle_err_front = limit_angle(GIMBAL_MOTOR_SIGN * (chassis_ctrl.yaw_angle - GIMBAL_FOLLOW_ZERO));
 		//此函数就是输入角度制，ai报错不用管
 		arm_sin_cos_f32(angle_err_front, &Chassis_Info.Transform.SIN, &Chassis_Info.Transform.COS);
 		
@@ -321,17 +310,37 @@ void Chassis_Taget_Update()
     {
         case Chassis_Follow:
         {
-            /* 模糊PID：根据角度误差和误差率动态调整增益 */
-            Fuzzy_Rule_Implementation(&angle_fuzzy_rule, gimbal_error_angle, 0.0f);
-            Pid_Vw_A.Kp = follow_angle_base[0] + angle_fuzzy_rule.KpFuzzy;
-            Pid_Vw_A.Ki = follow_angle_base[1];
-            Pid_Vw_A.Kd = follow_angle_base[2];
+            /* 模糊PID（可选）：启用时 Kp 动态 = 基础+增量；关闭时 Kp 保持 init 值，debug 直接改 */
+            if (chassis_ctrl.fuzzy.enable)
+            {
+                Fuzzy_Rule_Implementation(&chassis_ctrl.fuzzy, chassis_ctrl.error_angle, 0.0f);
+                chassis_ctrl.vw_angle.Kp = chassis_ctrl.angle_base[0] + chassis_ctrl.fuzzy.KpFuzzy;
+            }
 
-            float follow_feedback = PID_calc(&Pid_Vw_A, gimbal_error_angle, 0);
-            float abs_err = fabsf(gimbal_error_angle);
-            if (abs_err < 0.2f) follow_feedback = 0.0f;
-            else if (abs_err < 1.0f) follow_feedback *= (abs_err - 0.2f) / (1.0f - 0.2f);
-            Chassis_Info.Target.Vw = GIMBAL_MOTOR_SIGN * follow_feedback + follow_yaw_v;
+            /* 角度环（外环）：误差 -> 目标角速度(rad/s)，可单独开关 */
+            float vw_target = 0.0f;
+            if (chassis_ctrl.vw_angle.enable)
+            {
+                vw_target = PID_calc(&chassis_ctrl.vw_angle, chassis_ctrl.error_angle, 0);
+                float abs_err = fabsf(chassis_ctrl.error_angle);
+                if (abs_err < 0.2f) vw_target = 0.0f;
+                else if (abs_err < 1.0f) vw_target *= (abs_err - 0.2f) / (1.0f - 0.2f);
+            }
+
+            /* 四轮转速 -> 底盘 yaw 角速度（正运动学，本地无延迟的干净阻尼源） */
+            float wheel_deg_s[4];
+            for (int i = 0; i < 4; i++)
+                wheel_deg_s[i] = motor_chassis_3508[i].speed_rpm * M3508_RPM_TO_WHEEL_DEG_S;
+            float vx_tmp, vy_tmp, vw_actual;
+            mecanum_pos_kinematics(wheel_deg_s, &vx_tmp, &vy_tmp, &vw_actual);
+
+            /* 速度环（阻尼环）：目标 0，反馈 vw_actual，输出阻尼量，从角度环输出中减去，可单独开关 */
+            float vw_damp = 0.0f;
+            if (chassis_ctrl.vw_vel.enable)
+                vw_damp = PID_calc(&chassis_ctrl.vw_vel, vw_actual, 0.0f);
+
+            /* 最终 Vw = 角度环输出(带方向) - 速度阻尼 + 云台前馈 */
+            Chassis_Info.Target.Vw = GIMBAL_MOTOR_SIGN * vw_target - vw_damp + chassis_ctrl.yaw_v;
             /* 限幅（同旧工程 LIMIT ±speed_yaw_max） */
             if (Chassis_Info.Target.Vw > CHASSIS_YAW_SPEED_MAX)        Chassis_Info.Target.Vw = CHASSIS_YAW_SPEED_MAX;
             else if (Chassis_Info.Target.Vw < -CHASSIS_YAW_SPEED_MAX)  Chassis_Info.Target.Vw = -CHASSIS_YAW_SPEED_MAX;
@@ -339,8 +348,11 @@ void Chassis_Taget_Update()
         }
 
         case Chassis_Spin:
-            /* spin: robot_speed_w -> rad/s (open-loop, same as old CV_ROTATE) */
-            Chassis_Info.Target.Vw = gimbal_receiver_pack1.robot_speed_w / 100.0f * CHASSIS_YAW_SPEED_MAX;
+            /* spin: robot_speed_w -> rad/s (open-loop, same as old CV_ROTATE)，可单独开关 */
+            if (chassis_ctrl.spin.enable)
+                Chassis_Info.Target.Vw = gimbal_receiver_pack1.robot_speed_w / 100.0f * CHASSIS_YAW_SPEED_MAX;
+            else
+                Chassis_Info.Target.Vw = 0.0f;
             break;
 
         case Chassis_Tune:
@@ -372,10 +384,13 @@ void Chassis_Taget_Update()
 // ==========================================================
 void Chassis_PidCal(void)
 {
-    /* 4 个 3508 轮电机速度环：目标转速 = 逆运动学输出，反馈 = 电机实际转速 */
+    /* 4 个 3508 轮电机速度环：目标转速 = 逆运动学输出，反馈 = 电机实际转速（每个轮可单独开关） */
     for (int i = 0; i < 4; i++)
     {
-        PID_calc(&M3508_speedPID[i], motor_chassis_3508[i].speed_rpm * M3508_RPM_TO_WHEEL_DEG_S, Chassis_Info.Target.Wheeldeg[i]);
+        if (chassis_ctrl.wheel_speed[i].enable)
+            PID_calc(&chassis_ctrl.wheel_speed[i], motor_chassis_3508[i].speed_rpm * M3508_RPM_TO_WHEEL_DEG_S, Chassis_Info.Target.Wheeldeg[i]);
+        else
+            chassis_ctrl.wheel_speed[i].out = 0.0f;
     }
 }
 
@@ -388,8 +403,8 @@ void Chassis_Cmd(void)
     // 判断底盘是否处于允许运动的状态
     if(gimbal_receiver_pack1.robot_state == 1)
     {
-        CAN_cmd_chassis_travel(M3508_speedPID[0].out, M3508_speedPID[1].out,
-                               M3508_speedPID[2].out, M3508_speedPID[3].out);
+        CAN_cmd_chassis_travel(chassis_ctrl.wheel_speed[0].out, chassis_ctrl.wheel_speed[1].out,
+                               chassis_ctrl.wheel_speed[2].out, chassis_ctrl.wheel_speed[3].out);
     }
     else
     {

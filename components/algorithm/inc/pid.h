@@ -152,6 +152,7 @@ typedef float fp32;
 typedef struct
 {
     uint8_t mode;
+    uint8_t enable;  // 开关：1=使能 0=禁用
     //PID 三参数
     fp32 Kp;
     fp32 Ki;

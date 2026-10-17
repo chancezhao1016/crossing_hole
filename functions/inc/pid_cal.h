@@ -4,6 +4,7 @@
 
 #include "pid.h"
 #include "CAN_receive.h"
+#include "fuzzy_pid.h"
 
 //*************** PID 参数定义 *************//
 //底盘速度环参数
@@ -39,5 +40,31 @@ void Chassis_Spin_init(void);
 //*************** PID 结构体定义 *************//
 //pid	chassis
 
-extern 	PidTypeDef M3508_speedPID[4];
+typedef struct
+{
+    /* ===== 跟随状态 ===== */
+    float yaw_angle;            // 云台 yaw 角 0~360
+    float error_angle;          // 底盘/云台夹角
+    float yaw_v;                // 云台下发的 yaw 角速度 rad/s
+
+    /* ===== 各环基础增益（debug 里可改）===== */
+    fp32 wheel_base[3];         // 轮速度环 Kp Ki Kd
+    fp32 angle_base[3];         // 角度环 Kp Ki Kd
+    fp32 vel_base[3];           // 速度环（阻尼）Kp Ki Kd
+    fp32 spin_base[3];          // 小陀螺速度环 Kp Ki Kd
+    fp32 fuzzy_ratio[3];        // 模糊PID Kp/Ki/Kd 增量缩放
+    fp32 fuzzy_estep;           // 模糊误差步长(度)
+    fp32 fuzzy_ecstep;          // 模糊误差率步长(度/s)
+
+    /* ===== PID 环 ===== */
+    PidTypeDef wheel_speed[4];  // 轮速度环 ×4（3508）
+    PidTypeDef vw_angle;        // 跟随角度环
+    PidTypeDef vw_vel;          // 跟随速度环（阻尼）
+    PidTypeDef spin;            // 小陀螺速度环
+
+    /* ===== 模糊PID ===== */
+    FuzzyRule_t fuzzy;
+} Chassis_Ctrl_t;
+
+extern Chassis_Ctrl_t chassis_ctrl;
 #endif

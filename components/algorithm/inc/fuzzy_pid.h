@@ -14,6 +14,8 @@
 
 typedef struct
 {
+    uint8_t enable;   // 开关：1=使能 0=禁用
+
     float KpFuzzy;  // 模糊输出：Kp 增量
     float KiFuzzy;  // 模糊输出：Ki 增量
     float KdFuzzy;  // 模糊输出：Kd 增量

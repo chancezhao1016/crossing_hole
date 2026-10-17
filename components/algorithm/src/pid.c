@@ -302,6 +302,7 @@ void PID_init(PidTypeDef *pid, uint8_t mode, const fp32 PID[3], fp32 max_out, fp
         return;
     }
     pid->mode = mode;
+    pid->enable = 1;  // 默认使能
     pid->Kp = PID[0];
     pid->Ki = PID[1];
     pid->Kd = PID[2];

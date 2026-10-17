@@ -51,6 +51,7 @@ void Fuzzy_Rule_Init(FuzzyRule_t *fuzzyRule, float (*fuzzyRuleKp)[7], float (*fu
     fuzzyRule->eLast = 0.0f;
     fuzzyRule->last_tick = 0;
     fuzzyRule->dt = 0.001f;
+    fuzzyRule->enable = 1;  // 默认关（调参时再开）
 }
 
 void Fuzzy_Rule_Implementation(FuzzyRule_t *fuzzyRule, float measure, float ref)
